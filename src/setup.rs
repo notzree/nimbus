@@ -76,10 +76,15 @@ pub fn setup_nimbus(tx: SyncSender<bool>) -> Result<(), Box<dyn Error>> {
 
 fn parse_user_input() -> Result<Config, Box<dyn Error>> {
     let mut config = Config::default();
+    let default_download_path_buf = download_dir().unwrap();
+    let default_download_path = default_download_path_buf.to_str().unwrap();
     let mut download_path_prompt = Readline::default()
-        .title("where is the directory for your downloads")
+        .title(format!(
+            "where is the directory for your downloads. leave blank for {}",
+            &default_download_path,
+        ))
         .validator(
-            |text| Path::new(text).is_dir(),
+            |text| Path::new(text).is_dir() || text.trim().is_empty(),
             |text| format!("Must be a valid directory. Got {} instead", text),
         )
         .prompt()?;
@@ -113,7 +118,14 @@ fn parse_user_input() -> Result<Config, Box<dyn Error>> {
         .lines(2)
         .prompt()?;
 
-    config.download_path = PathBuf::from(download_path_prompt.run()?);
+    // config.download_path = PathBuf::from(download_path_prompt.run()?);
+    let download_path_input = download_path_prompt.run()?;
+    config.download_path = if download_path_input.trim().is_empty() {
+        default_download_path_buf
+    } else {
+        PathBuf::from(download_path_input)
+    };
+
     config.base_path = PathBuf::from(base_path_prompt.run()?);
     config.start_year = start_year_prompt.run()?.parse().unwrap();
     config.end_year = end_year_prompt.run()?.parse().unwrap();
