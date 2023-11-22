@@ -11,7 +11,7 @@ pub enum Commands {
     //Starts a reveiw
     Review,
     //Starts the daemon
-    Daemon,
+    Start,
 }
 
 #[derive(Parser)]

@@ -1,25 +1,57 @@
+use chrono::{Datelike, Local};
 use dirs::download_dir;
 use promkit::{preset::QuerySelect, preset::Readline, preset::Select};
-use serde::Serialize;
+use reqwest;
+use serde::{Deserialize, Serialize};
 use serde_yaml;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Sender, SyncSender};
 
-#[derive(Default, Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Course {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub download_path: PathBuf,
     pub base_path: PathBuf,
     pub start_year: i32,
     pub end_year: i32,
     pub coop: bool,
+    pub courses: Vec<Course>,
+    api_key: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+struct CourseInfo {
+    courseId: Option<String>,
+    courseOfferNumber: Option<i32>,
+    termCode: Option<String>,
+    termName: Option<String>,
+    associatedAcademicCareer: Option<String>,
+    associatedAcademicGroupCode: Option<String>,
+    associatedCcademicOrgCode: Option<String>,
+    subjectCode: Option<String>,
+    catalogNumber: Option<String>,
+    title: Option<String>,
+    descriptionAbbreviated: Option<String>,
+    description: Option<String>,
+    gradingBasis: Option<String>,
+    courseComponentCode: Option<String>,
+    enrollConsentCode: Option<String>,
+    enrollConsentDescription: Option<String>,
+    dropConsentCode: Option<String>,
+    dropConsentDescription: Option<String>,
+    requirementsDescription: Option<String>,
 }
 
-pub fn setup_nimbus(tx: SyncSender<bool>) -> Result<(), Box<dyn Error>> {
+pub async fn setup_nimbus() -> Result<(), Box<dyn Error>> {
     if Path::new("config.yaml").exists() {
         log::info!("Config file exists");
         let mut continue_prompt = QuerySelect::new(['Y', 'N'], |text, items| -> Vec<String> {
@@ -41,7 +73,8 @@ pub fn setup_nimbus(tx: SyncSender<bool>) -> Result<(), Box<dyn Error>> {
             std::process::exit(0);
         }
     }
-    let config = parse_user_input()?;
+
+    let config = parse_user_input().await?;
     write_config(config.clone()).expect("Failed to save config");
     log::info!("Saved config");
 
@@ -54,27 +87,11 @@ pub fn setup_nimbus(tx: SyncSender<bool>) -> Result<(), Box<dyn Error>> {
         Ok(_) => log::info!("Created term directories"),
         Err(e) => log::error!("Failed to create term directories: {}", e),
     }
-
-    let mut daemon_prompt = QuerySelect::new([true, false], |text, items| -> Vec<String> {
-        text.parse::<usize>()
-            .map(|query| {
-                items
-                    .iter()
-                    .filter(|num| query <= num.parse::<usize>().unwrap_or_default())
-                    .map(|num| num.to_string())
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or(items.clone())
-    })
-    .title("Start daemon?")
-    .item_lines(2)
-    .prompt()?;
-    let daemon = daemon_prompt.run()?.parse().unwrap();
-    tx.send(daemon).unwrap();
     Ok(())
 }
 
-fn parse_user_input() -> Result<Config, Box<dyn Error>> {
+async fn parse_user_input() -> Result<Config, Box<dyn Error>> {
+    let mut courses_map: HashMap<String, Option<String>> = HashMap::new();
     let mut config = Config::default();
     let default_download_path_buf = download_dir().unwrap();
     let default_download_path = default_download_path_buf.to_str().unwrap();
@@ -117,26 +134,42 @@ fn parse_user_input() -> Result<Config, Box<dyn Error>> {
         .title("Do you have co-op?")
         .lines(2)
         .prompt()?;
+    let mut courses_prompt = Readline::default()
+        .title("What courses are you taking this term? Please provide your answers in a comma separated list")
+        .validator(
+            |text| is_comma_separated_list(text),
+            |text| format!("Must be a comma seperated list. Got {} instead", text),
+        )
+        .prompt()?;
 
-    // config.download_path = PathBuf::from(download_path_prompt.run()?);
+    let mut waterloo_api_key_prompt = Readline::default()
+        .title("Enter your Waterloo OpenData API Key or leave blank to use richards")
+        .prompt()?;
+
+    let waterloo_api_key = waterloo_api_key_prompt.run()?;
+    config.api_key = if waterloo_api_key.trim().is_empty() {
+        "71BE603A75AE488CB068D7A9D56333A2".to_string()
+    } else {
+        waterloo_api_key
+    };
+
+    courses_map = generate_course_map(config.clone().api_key).await?;
     let download_path_input = download_path_prompt.run()?;
     config.download_path = if download_path_input.trim().is_empty() {
         default_download_path_buf
     } else {
         PathBuf::from(download_path_input)
     };
-
     config.base_path = PathBuf::from(base_path_prompt.run()?);
     config.start_year = start_year_prompt.run()?.parse().unwrap();
     config.end_year = end_year_prompt.run()?.parse().unwrap();
     config.coop = coop_prompt.run()?.parse().unwrap();
+    config.courses = parse_course_list(courses_prompt.run()?, courses_map);
     Ok(config)
 }
 
-fn read_config() -> Result<Config, io::Error> {
-    let mut file = File::open("config.yaml")?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
+pub fn read_config() -> Result<Config, io::Error> {
+    let contents = include_str!("../config.yaml");
     let parsed_data: Config = serde_yaml::from_str(&contents)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(parsed_data)
@@ -176,4 +209,90 @@ fn create_term_directories(current_term: &str, base_dir: PathBuf) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn parse_course_list(s: String, courses_map: HashMap<String, Option<String>>) -> Vec<Course> {
+    let mut courses: Vec<Course> = Vec::new();
+    let course_list = csl_to_vec(s);
+    for course in course_list {
+        let course_name = course.clone();
+        let course_description = courses_map.get(&course).unwrap();
+        match (course_description) {
+            Some(course_description) => courses.push(Course {
+                name: course_name,
+                description: course_description.clone(),
+            }),
+            None => println!("{}: {}", course, "No description found"),
+        }
+    }
+    courses
+}
+
+fn remove_whitespace(s: String) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn is_comma_separated_list(s: &str) -> bool {
+    s.contains(',')
+}
+fn csl_to_vec(s: String) -> Vec<String> {
+    let str = remove_whitespace(s);
+    str.split(',').map(|s| s.to_string()).collect()
+}
+
+fn generate_term_code() -> String {
+    let current_date = Local::now();
+    let year = current_date.year();
+    let month = current_date.month();
+
+    let a = if year < 2000 { "0" } else { "1" };
+    let yy = format!("{:02}", year % 100);
+    let term_month = match month {
+        1..=4 => "1",        // January to April
+        5..=8 => "5",        // May to August
+        9..=12 => "9",       // September to December
+        _ => unreachable!(), // This case should never happen
+    };
+    format!("{}{}{}", a, yy, term_month)
+}
+
+async fn generate_course_map(
+    api_key: String,
+) -> Result<HashMap<String, Option<String>>, Box<dyn Error>> {
+    let url = "https://openapi.data.uwaterloo.ca/v3";
+    let term_code = generate_term_code();
+    let full_url = format!("{}/Courses/{}", url, term_code);
+    let client = reqwest::Client::new();
+    let mut courses_map: HashMap<String, Option<String>> = HashMap::new();
+    log::info!("Grabbing course data...");
+    log::info!("URL: {}", full_url);
+    let response = client
+        .get(full_url)
+        .header("accept", "application/json")
+        .header("x-api-key", api_key)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let courses: Vec<CourseInfo> = match response.json::<Vec<CourseInfo>>().await {
+            Ok(courses) => courses,
+            Err(e) => {
+                eprintln!("Failed to deserialize response: {}", e);
+                return Err(Box::new(e)); // Or handle the error as appropriate
+            }
+        };
+        log::info!("Got course data");
+        for course in courses {
+            if let (Some(subject_code), Some(catalog_number)) =
+                (&course.subjectCode, &course.catalogNumber)
+            {
+                let key = format!("{}{}", subject_code, catalog_number);
+                courses_map.insert(key, course.description.clone());
+            }
+        }
+    } else {
+        eprintln!("Request failed with status: {}", response.status());
+    }
+
+    Ok(courses_map)
 }
