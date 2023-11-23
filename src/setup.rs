@@ -137,7 +137,7 @@ async fn parse_user_input() -> Result<Config, Box<dyn Error>> {
     let mut courses_prompt = Readline::default()
         .title("What courses are you taking this term? Please provide your answers in a comma separated list")
         .validator(
-            |text| is_comma_separated_list(text),
+            |text| is_valid_course_list(text),
             |text| format!("Must be a comma seperated list. Got {} instead", text),
         )
         .prompt()?;
@@ -232,8 +232,8 @@ fn remove_whitespace(s: String) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-fn is_comma_separated_list(s: &str) -> bool {
-    s.contains(',')
+fn is_valid_course_list(s: &str) -> bool {
+    s.contains(',') || (!s.contains(' ') && !s.contains(','))
 }
 fn csl_to_vec(s: String) -> Vec<String> {
     let str = remove_whitespace(s);
