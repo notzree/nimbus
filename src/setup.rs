@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local};
+use chrono::{expect, Datelike, Local};
 use dirs::download_dir;
 use promkit::{preset::QuerySelect, preset::Readline, preset::Select};
 use reqwest;
@@ -148,7 +148,9 @@ async fn parse_user_input() -> Result<Config, Box<dyn Error>> {
 
     let waterloo_api_key = waterloo_api_key_prompt.run()?;
     config.api_key = if waterloo_api_key.trim().is_empty() {
-        "71BE603A75AE488CB068D7A9D56333A2".to_string()
+        std::env::var("WATERLOO_API_KEY")
+            .expect("Missing Waterloo OpenData API Key")
+            .to_string()
     } else {
         waterloo_api_key
     };
@@ -214,10 +216,11 @@ fn create_term_directories(current_term: &str, base_dir: PathBuf) -> Result<(), 
 fn parse_course_list(s: String, courses_map: HashMap<String, Option<String>>) -> Vec<Course> {
     let mut courses: Vec<Course> = Vec::new();
     let course_list = csl_to_vec(s);
+    print!("{:?}", course_list);
     for course in course_list {
-        let course_name = course.clone();
+        let course_name = course.clone().to_ascii_uppercase();
         let course_description = courses_map.get(&course).unwrap();
-        match (course_description) {
+        match course_description {
             Some(course_description) => courses.push(Course {
                 name: course_name,
                 description: course_description.clone(),
