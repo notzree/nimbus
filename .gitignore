@@ -3,3 +3,5 @@
 config.yaml
 ```
 .env
+commands.txt
+.gitignore
