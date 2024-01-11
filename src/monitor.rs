@@ -1,15 +1,15 @@
 use crate::review::{write_command, Command, CommandEnum, ReasonEnum};
 
+use crate::setup::{read_config, Config, Course};
 use chatgpt::prelude::*;
-use notify::event::{CreateKind, EventKind};
-use notify::{Error, FsEventWatcher};
+use notify::event::{CreateKind, EventKind, ModifyKind};
+use notify::{Error, Event, FsEventWatcher};
 use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, FileIdMap};
 use plist::Value;
-use std::path::PathBuf;
-
-use crate::setup::{read_config, Course};
+use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::{
     path::Path,
     sync::mpsc::{channel, Sender},
@@ -42,6 +42,7 @@ pub fn start_monitor() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
     let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel();
     let config = read_config()?;
+    let directory_map = create_directory_map(&config)?;
     let courses = config.courses;
     let download_path = config.download_path;
     log::info!("Starting monitor on {}", download_path.to_str().unwrap());
@@ -56,18 +57,30 @@ pub fn start_monitor() -> std::result::Result<(), Box<dyn std::error::Error>> {
             if let Ok(ParseEventResult::File(file)) = file {
                 log::info!("File: {:?}", file);
                 match grep_course_code(&file, courses.clone()) {
-                    Ok(GrepCourseCodeResult::Course(Course)) => {
+                    Ok(GrepCourseCodeResult::Course(_course)) => {
+                        let directory = directory_map.get(&_course.name).unwrap();
                         let command: Command = Command {
-                            file_path: file.path.clone(),
+                            file_path: Some(file.path.clone()),
                             command: CommandEnum::Move,
-                            destination: None,
+                            destination: Some(directory.to_path_buf()), // TODO: Add destination.
                             reason: Some(ReasonEnum::CourseCode),
                         };
                         log::info!("Saving command: {:?}", command);
                         write_command(command).unwrap();
                     }
                     Ok(GrepCourseCodeResult::Empty) => {
-                        // Continue checking by reading file
+                        let contents = get_file_contents(file.path.to_str().unwrap());
+                        match contents {
+                            Ok(contents) => {}
+                            Err(e) => {
+                                let command: Command = Command {
+                                    file_path: (None),
+                                    command: (CommandEnum::Indeterminate),
+                                    destination: (None),
+                                    reason: (None),
+                                };
+                            }
+                        }
                     }
                     Err(e) => {
                         log::error!("Error: {}", e);
@@ -106,10 +119,28 @@ fn create_debouncer<P: AsRef<Path>>(
     Ok((debouncer, ()))
 }
 
+fn create_directory_map(
+    config: &Config,
+) -> std::result::Result<HashMap<String, PathBuf>, Box<dyn std::error::Error>> {
+    let mut map = HashMap::new();
+    let base_path = Path::new(&config.base_path);
+    let current_term = &config.current_term;
+    for course in &config.courses {
+        map.insert(
+            course.name.clone(),
+            base_path.join(current_term).join(&course.name),
+        );
+    }
+    Ok(map)
+}
+
 fn parse_event(
     event: DebouncedEvent,
 ) -> std::result::Result<ParseEventResult, Box<dyn std::error::Error>> {
-    if let EventKind::Create(CreateKind::File) = event.event.kind {
+    if let EventKind::Create(CreateKind::File) | EventKind::Modify(ModifyKind::Any) =
+        event.event.kind
+    {
+        log::info!("Running some code");
         let path = event
             .event
             .paths
@@ -127,7 +158,6 @@ fn parse_event(
             for item in array {
                 if let Value::String(url) = item {
                     let file_name = extract_filename(path).ok_or("Failed to extract filename")?;
-
                     return Ok(ParseEventResult::File(File {
                         name: file_name.to_string(),
                         url,
@@ -160,8 +190,9 @@ fn grep_course_code(
     file: &File,
     courses: Vec<Course>,
 ) -> std::result::Result<GrepCourseCodeResult, Box<dyn std::error::Error>> {
+    let sanitized_name: String = file.name.chars().filter(|c| !c.is_whitespace()).collect();
     for course in courses {
-        if file.name.contains(&course.name) || file.url.contains(&course.name) {
+        if sanitized_name.contains(&course.name) || file.url.contains(&course.name) {
             return Ok(GrepCourseCodeResult::Course(course));
         }
     }

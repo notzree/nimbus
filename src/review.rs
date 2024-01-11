@@ -1,14 +1,17 @@
+use promkit::preset::Select;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufRead;
+use std::io::Error;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReasonEnum {
     Chatgpt,
     CourseCode,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CommandEnum {
     Move,
     Skip,
@@ -17,7 +20,7 @@ pub enum CommandEnum {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
-    pub file_path: PathBuf,
+    pub file_path: Option<PathBuf>,
     pub command: CommandEnum,
     pub destination: Option<PathBuf>,
     pub reason: Option<ReasonEnum>,
@@ -37,22 +40,48 @@ pub fn write_command(command: Command) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-pub fn read_commands() -> Result<Vec<Command>, Box<dyn std::error::Error>> {
+pub fn read_commands() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = PathBuf::from(COMMAND_FILE_PATH);
-    let mut commands = Vec::new();
     let file = File::open(file_path)?;
     let reader = std::io::BufReader::new(file);
     for lines in reader.lines() {
         let line = lines?;
         match serde_json::from_str::<Command>(&line) {
             Ok(obj) => {
-                println!("{:?}", obj);
-                commands.push(obj);
+                let mut confirmation_prompt = Select::new(["Y", "N"])
+                    .title(format!("Do you want to execute this command?: {:?}", obj))
+                    .lines(4)
+                    .prompt()?;
+                let confirmation_result = confirmation_prompt.run()?;
+                if confirmation_result == "Y" {
+                    if obj.command == CommandEnum::Move {
+                        let file_path = obj.file_path.unwrap();
+                        let destination = obj.destination.unwrap();
+                        let file_name = get_file_name(file_path.to_str().unwrap()).unwrap();
+                        let new_file_path = destination.join(file_name);
+                        match std::fs::rename(file_path, new_file_path) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("Error moving file: {:?}", e);
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Error deserializing line: {:?}", e);
             }
         }
     }
-    Ok(commands)
+    clear_file(COMMAND_FILE_PATH)?;
+
+    Ok(())
+}
+
+fn get_file_name(path: &str) -> Option<&str> {
+    Path::new(path).file_name()?.to_str()
+}
+fn clear_file(path: &str) -> Result<(), Error> {
+    File::create(path)?;
+    Ok(())
 }

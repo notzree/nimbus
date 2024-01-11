@@ -22,6 +22,7 @@ pub struct Course {
 pub struct Config {
     pub download_path: PathBuf,
     pub base_path: PathBuf,
+    pub current_term: String,
     pub start_year: i32,
     pub end_year: i32,
     pub coop: bool,
@@ -73,20 +74,10 @@ pub async fn setup_nimbus() -> Result<(), Box<dyn Error>> {
             std::process::exit(0);
         }
     }
-
     let config = parse_user_input().await?;
     write_config(config.clone()).expect("Failed to save config");
     log::info!("Saved config");
 
-    let mut term_prompt = Select::new(["1A", "1B", "2A", "2B", "3A", "3B", "4A", "4B"])
-        .title("What term are you currently in?")
-        .lines(4)
-        .prompt()?;
-    let current_term = term_prompt.run()?;
-    match create_term_directories(&current_term, config.clone().base_path) {
-        Ok(_) => log::info!("Created term directories"),
-        Err(e) => log::error!("Failed to create term directories: {}", e),
-    }
     Ok(())
 }
 
@@ -162,11 +153,21 @@ async fn parse_user_input() -> Result<Config, Box<dyn Error>> {
     } else {
         PathBuf::from(download_path_input)
     };
+    let mut term_prompt = Select::new(["1A", "1B", "2A", "2B", "3A", "3B", "4A", "4B"])
+        .title("What term are you currently in?")
+        .lines(4)
+        .prompt()?;
+    let current_term = term_prompt.run()?;
+    match create_term_directories(&current_term, config.clone().base_path) {
+        Ok(_) => log::info!("Created term directories"),
+        Err(e) => log::error!("Failed to create term directories: {}", e),
+    }
     config.base_path = PathBuf::from(base_path_prompt.run()?);
     config.start_year = start_year_prompt.run()?.parse().unwrap();
     config.end_year = end_year_prompt.run()?.parse().unwrap();
     config.coop = coop_prompt.run()?.parse().unwrap();
     config.courses = parse_course_list(courses_prompt.run()?, courses_map);
+    config.current_term = current_term;
     Ok(config)
 }
 
@@ -216,7 +217,6 @@ fn create_term_directories(current_term: &str, base_dir: PathBuf) -> Result<(), 
 fn parse_course_list(s: String, courses_map: HashMap<String, Option<String>>) -> Vec<Course> {
     let mut courses: Vec<Course> = Vec::new();
     let course_list = csl_to_vec(s);
-    print!("{:?}", course_list);
     for course in course_list {
         let course_name = course.clone().to_ascii_uppercase();
         let course_description = courses_map.get(&course).unwrap();
